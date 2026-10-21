@@ -1,6 +1,6 @@
 # SnapEDA Parts Search for KiCad
 
-KiCad 10 PCB Editor IPC action opens a native wxPython search window for SnapEDA parts, with symbol/footprint/3D availability, image preview, and authenticated HTTP export. Linux is the first supported platform. Sign-in is entered locally; credentials and cookies are held in memory. Optional password remembering uses an available secure OS keyring and is off by default. The plugin does not read or write a regular browser profile.
+KiCad 10 PCB and Schematic Editor IPC action opens a native wxPython search window for SnapEDA parts, with symbol/footprint/3D availability, image preview, and authenticated HTTP export. Linux is the first supported platform. Sign-in is entered locally; credentials and cookies are held in memory. Optional password remembering uses an available secure OS keyring and is off by default. The plugin does not read or write a regular browser profile.
 
 This project is distributed under **GPL-3.0-or-later**; see [LICENSE](LICENSE).
 
@@ -40,7 +40,7 @@ Run the one-time installer from this checkout with KiCad's system Python:
 python3 install_plugin.py
 ```
 
-It asks before copying to `${KICAD_DOCUMENTS_HOME}/10.0/plugins/snapeda-parts-search` (by default `~/.local/share/KiCad/10.0/plugins/snapeda-parts-search`) and refuses to replace an existing plugin directory. Restart KiCad and open the PCB Editor; use the **Search SnapEDA Parts** action. KiCad 10 exposes IPC add-on actions in the PCB Editor, not the Schematic Editor. Set `SNAPEDA_KICAD_PYTHON` if the system Python with wxPython and curl_cffi is not discoverable as `python3`.
+It asks before copying to `${KICAD_DOCUMENTS_HOME}/10.0/plugins/snapeda-parts-search` (by default `~/.local/share/KiCad/10.0/plugins/snapeda-parts-search`) and refuses to replace an existing plugin directory. Restart KiCad and open the PCB Editor or Schematic Editor; use the **Search SnapEDA Parts** toolbar action. Set `SNAPEDA_KICAD_PYTHON` if the system Python with wxPython and curl_cffi is not discoverable as `python3`.
 
 ## Run standalone
 
@@ -64,7 +64,7 @@ Search bootstraps an anonymous session from SnapEDA's search page, then uses the
 
 The download limit is per file, not an aggregate disk quota. Temporary files and the saved copy may coexist, and monitoring can allow transient overshoot. Keep sufficient free disk space.
 
-The part search dialog uses a directory picker for the project root rather than inferring the open board path. KiCad 10's IPC API does not expose schematic-editor add-on actions; this plugin is available from the PCB Editor.
+The part search dialog uses a directory picker for the project root rather than inferring the open board path. The same IPC action is available from both the PCB and Schematic Editors.
 
 ## HTTP login behavior
 
@@ -86,7 +86,7 @@ python -m snapeda_plugin.http_auth --inspect-part-url 'https://www.snapeda.com/p
 
 The `12345` value is a placeholder for the selected result's actual numeric ID. Inspection does not imply the HTTP login or mapping has been verified for other parts.
 
-KiCad integration follows its [IPC add-on guide](https://dev-docs.kicad.org/en/apis-and-binding/ipc-api/for-addon-developers/) and the official [plugin schema](https://go.kicad.org/api/schemas/v1). KiCad 9/10 support IPC actions only in the PCB Editor.
+KiCad integration follows its [IPC add-on guide](https://dev-docs.kicad.org/en/apis-and-binding/ipc-api/for-addon-developers/) and the official [plugin schema](https://go.kicad.org/api/schemas/v1). This plugin targets KiCad 10 IPC actions in both the PCB and Schematic Editors.
 
 ## Checks
 

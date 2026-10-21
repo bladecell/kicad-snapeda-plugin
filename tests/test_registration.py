@@ -637,7 +637,9 @@ def test_explicit_no_model_choice_is_respected_in_ambiguous_package() -> None:
 def test_ipc_plugin_manifest_matches_kicad_schema_shape() -> None:
     manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text())
     assert manifest["runtime"]["type"] == "python"
-    assert manifest["actions"][0]["scopes"] == ["pcb"]
+    assert manifest["actions"][0]["scopes"] == ["pcb", "schematic"]
+    assert manifest["actions"][0]["icons-light"] == ["icon_light.png"]
+    assert manifest["actions"][0]["icons-dark"] == ["icon_dark.png"]
     assert manifest["actions"][0]["entrypoint"] == "ipc_action.py"
 
 

@@ -53,6 +53,33 @@ def test_build_package_is_reproducible_and_contains_only_pcm_payload(
         assert "download_url" not in version
 
 
+def test_toolbar_icons_and_editor_scopes_are_in_package(tmp_path: Path) -> None:
+    manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
+    action = manifest["actions"][0]
+    assert action["scopes"] == ["pcb", "schematic"]
+    icon_names = (*action["icons-light"], *action["icons-dark"])
+    assert set(icon_names) == {"icon_light.png", "icon_dark.png"}
+
+    package = tmp_path / "package.zip"
+    build_package(ROOT, VERSION, package)
+
+    wx = pytest.importorskip("wx")
+    app = wx.App(False)
+    with zipfile.ZipFile(package) as archive:
+        for icon_name in set(icon_names):
+            icon_path = tmp_path / icon_name
+            icon_path.write_bytes(archive.read(f"plugins/{icon_name}"))
+            image = wx.Image(str(icon_path), wx.BITMAP_TYPE_PNG)
+            assert image.IsOk()
+            assert (image.GetWidth(), image.GetHeight()) == (32, 32)
+            assert image.HasAlpha()
+            for dimension in (16, 24, 32):
+                scaled = image.Scale(dimension, dimension, wx.IMAGE_QUALITY_HIGH)
+                assert scaled.IsOk()
+                assert any(scaled.GetAlpha())
+    app.Destroy()
+
+
 def test_repository_keeps_other_packages_and_prior_versions(tmp_path: Path) -> None:
     package = tmp_path / "package.zip"
     build_package(ROOT, VERSION, package)

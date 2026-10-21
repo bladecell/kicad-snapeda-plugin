@@ -22,6 +22,8 @@ VERSION_PATTERN = re.compile(
 )
 PAYLOAD_FILES = (
     "plugin.json",
+    "icon_light.png",
+    "icon_dark.png",
     "ipc_action.py",
     "launch.py",
     "snapeda_plugin/__init__.py",

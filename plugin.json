@@ -13,7 +13,9 @@
       "name": "Search SnapEDA Parts",
       "description": "Find a SnapEDA part and import its KiCad libraries.",
       "show-button": true,
-      "scopes": ["pcb"],
+      "scopes": ["pcb", "schematic"],
+      "icons-light": ["icon_light.png"],
+      "icons-dark": ["icon_dark.png"],
       "entrypoint": "ipc_action.py"
     }
   ]
