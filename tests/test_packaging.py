@@ -31,10 +31,14 @@ def test_build_package_is_reproducible_and_contains_only_pcm_payload(
         assert "plugins/ipc_action.py" in names
         assert "plugins/launch.py" in names
         assert "plugins/LICENSE" in names
+        assert (
+            archive.read("plugins/requirements.txt")
+            == (ROOT / "requirements-system.txt").read_bytes()
+        )
+        assert "plugins/requirements-system.txt" not in names
         assert b"GNU GENERAL PUBLIC LICENSE" in archive.read("plugins/LICENSE")
         assert "plugins/snapeda_plugin/browser.py" not in names
         assert "plugins/snapeda_plugin/browser_helper.py" not in names
-        assert "plugins/requirements-system.txt" not in names
         assert not any(name.startswith("plugins/tests/") for name in names)
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
         package_metadata = json.loads(archive.read("metadata.json"))

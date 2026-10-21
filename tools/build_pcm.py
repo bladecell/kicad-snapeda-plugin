@@ -90,6 +90,12 @@ def build_package(root: Path, version: str, output: Path) -> Path:
         members = [("metadata.json", metadata.encode("utf-8"))]
         members.append(("plugins/__init__.py", b'"""KiCad PCM plugin payload."""\n'))
         members.append(("plugins/LICENSE", (root / "LICENSE").read_bytes()))
+        members.append(
+            (
+                "plugins/requirements.txt",
+                (root / "requirements-system.txt").read_bytes(),
+            )
+        )
         members.extend(
             (f"plugins/{relative}", (root / relative).read_bytes())
             for relative in PAYLOAD_FILES
