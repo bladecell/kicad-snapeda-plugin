@@ -1,0 +1,107 @@
+name: Build and publish KiCad PCM release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: pcm-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Determine release version
+        id: release-version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Install packaging test tools
+        run: python -m pip install pytest jsonschema
+      - name: Run packaging tests
+        run: >-
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+          tests/test_packaging.py tests/test_pcm_workflow.py
+      - name: Fetch current public package index when available
+        run: |
+          python tools/fetch_pcm_index.py \
+            --url https://bladecell.github.io/kicad-snapeda-plugin/packages.json \
+            --output /tmp/previous-packages.json
+          if [ -f /tmp/previous-packages.json ]; then
+            echo "PREVIOUS_PACKAGES=/tmp/previous-packages.json" >> "$GITHUB_ENV"
+          else
+            echo "No previous public package index found (404); creating an initial index."
+          fi
+      - name: Build PCM archive and repository metadata
+        env:
+          VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          args=()
+          if [ -n "${PREVIOUS_PACKAGES:-}" ]; then
+            args+=(--existing-packages "$PREVIOUS_PACKAGES")
+          fi
+          python tools/build_pcm.py --version "$VERSION" --output-dir dist "${args[@]}"
+          mkdir -p site
+          cp dist/repository.json dist/packages.json site/
+          mkdir -p artifact/release artifact/site
+          cp dist/*.zip artifact/release/
+          cp site/*.json artifact/site/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcm-release
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcm-release
+          path: release-files
+      - name: Publish GitHub Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create --repo "$GITHUB_REPOSITORY" --verify-tag "$GITHUB_REF_NAME" \
+            release-files/release/*.zip \
+            --title "SnapEDA Parts Search $VERSION" \
+            --notes "KiCad PCM package release $VERSION. Package status: development."
+
+  pages:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcm-release
+          path: artifact
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: artifact/site
+      - id: deployment
+        uses: actions/deploy-pages@v4

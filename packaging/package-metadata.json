@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v2",
+  "name": "SnapEDA Parts Search",
+  "description": "Search SnapEDA and import symbols, footprints, and 3D models.",
+  "description_full": "A KiCad 10 PCB Editor IPC action that searches SnapEDA parts and imports symbol, footprint, and 3D model assets. Linux is the supported platform. Requires a Python interpreter with KiCad's wxPython runtime and curl_cffi; these are not installed by PCM.",
+  "identifier": "org.snapeda.kicad.parts-search",
+  "type": "plugin",
+  "author": {
+    "name": "bladecell",
+    "contact": {
+      "web": "https://github.com/bladecell"
+    }
+  },
+  "license": "GPL-3.0-or-later",
+  "resources": {
+    "Homepage": "https://github.com/bladecell/kicad-snapeda-plugin",
+    "Repository": "https://github.com/bladecell/kicad-snapeda-plugin",
+    "Issues": "https://github.com/bladecell/kicad-snapeda-plugin/issues"
+  },
+  "tags": ["pcb", "parts", "search"],
+  "versions": []
+}
