@@ -521,24 +521,56 @@ def _import_project_shared(
     model_choices: dict[str, str] | None,
 ) -> ImportedLibraries:
     """Merge project imports into the SnapEDA project libraries transactionally."""
-    project.mkdir(parents=True, exist_ok=True)
     with _table_directory_lock(project) as project_fd:
-        return _import_project_shared_locked(
-            contents, project, part_name, model_choices, project_fd
-        )
+        created_dirs: list[tuple[int, str]] = []
+        owned_fds: list[int] = []
+        library_fd = project_fd
+        try:
+            for name in ("libs", "SnapEDA"):
+                next_fd, created = _ensure_child_directory(library_fd, name)
+                if created:
+                    created_dirs.append((library_fd, name))
+                if library_fd != project_fd:
+                    owned_fds.append(library_fd)
+                library_fd = next_fd
+            return _import_project_shared_locked(
+                contents,
+                project,
+                project / "libs" / "SnapEDA",
+                part_name,
+                model_choices,
+                project_fd,
+                library_fd,
+                created_dirs,
+            )
+        except BaseException:
+            for parent_fd, name in reversed(created_dirs):
+                try:
+                    os.rmdir(name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if library_fd != project_fd:
+                owned_fds.append(library_fd)
+            for descriptor in reversed(owned_fds):
+                os.close(descriptor)
 
 
 def _import_project_shared_locked(
     contents: ArchiveContents,
     project: Path,
+    library_parent: Path,
     part_name: str,
     model_choices: dict[str, str] | None,
     project_fd: int,
+    library_fd: int,
+    created_dirs: list[tuple[int, str]],
 ) -> ImportedLibraries:
     part = safe_name(part_name)
-    symbol_path = project / "SnapEDA.kicad_sym"
-    footprint_path = project / "SnapEDA.pretty"
-    model_root = project / "SnapEDA.3dshapes"
+    symbol_path = library_parent / "SnapEDA.kicad_sym"
+    footprint_path = library_parent / "SnapEDA.pretty"
+    model_root = library_parent / "SnapEDA.3dshapes"
     sym_table = project / "sym-lib-table" if contents.symbols else None
     fp_table = project / "fp-lib-table" if contents.footprints else None
     entries: list[tuple[Path, str, str]] = []
@@ -549,7 +581,7 @@ def _import_project_shared_locked(
                 "sym_lib_table",
                 _entry(
                     "SnapEDA",
-                    "${KIPRJMOD}/SnapEDA.kicad_sym",
+                    "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym",
                     "SnapEDA project symbols",
                 ),
             )
@@ -561,7 +593,7 @@ def _import_project_shared_locked(
                 "fp_lib_table",
                 _entry(
                     "SnapEDA",
-                    "${KIPRJMOD}/SnapEDA.pretty",
+                    "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty",
                     "SnapEDA project footprints",
                 ),
             )
@@ -593,7 +625,7 @@ def _import_project_shared_locked(
             staged_assets[model_root / part / model.name] = model.data
     symbol_original: bytes | None = None
     if contents.symbols:
-        symbol_original = _read_at(project_fd, symbol_path.name)
+        symbol_original = _read_at(library_fd, symbol_path.name)
         if symbol_original is None:
             validate_symbol_inheritance(incoming_symbols)
             combined_symbols = incoming_symbols
@@ -635,13 +667,24 @@ def _import_project_shared_locked(
     staged_assets.update(footprint_assets)
 
     changed: dict[Path, tuple[bytes | None, bytes, tuple[int, int] | None]] = {}
-    created_dirs: list[tuple[int, str]] = []
     directory_fds: dict[Path, int] = {}
     try:
         try:
             filtered_entries: list[tuple[Path, str, str]] = []
             table_snapshots: dict[Path, bytes | None] = {}
-            for table_path, table_type, entry in entries:
+            expected_table_uris = (
+                (
+                    project / "sym-lib-table",
+                    "sym_lib_table",
+                    "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym",
+                ),
+                (
+                    project / "fp-lib-table",
+                    "fp_lib_table",
+                    "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty",
+                ),
+            )
+            for table_path, table_type, expected_uri in expected_table_uris:
                 table_snapshots[table_path] = _read_at(project_fd, table_path.name)
                 current = _table_text_at(project_fd, table_path.name, table_type)
                 registered = next(
@@ -655,26 +698,43 @@ def _import_project_shared_locked(
                     ),
                     None,
                 )
+                if (
+                    registered is not None
+                    and field_value(registered, "uri") != expected_uri
+                ):
+                    raise ValueError(
+                        "Library nickname already registered at another path: SnapEDA; "
+                        "existing project libraries were left unchanged"
+                    )
+            for table_path, table_type, entry in entries:
+                current = _table_text_at(project_fd, table_path.name, table_type)
+                registered = next(
+                    (
+                        node
+                        for node in parse(current).children
+                        if node.value is None
+                        and node.children
+                        and node.children[0].value == "lib"
+                        and field_value(node, "name") == "SnapEDA"
+                    ),
+                    None,
+                )
                 if registered is not None:
-                    if field_value(registered, "uri") != field_value(
-                        parse(entry), "uri"
-                    ):
-                        raise ValueError("Library nickname already registered: SnapEDA")
                     continue
                 filtered_entries.append((table_path, table_type, entry))
             entries = filtered_entries
             if contents.footprints:
                 directory_fds[footprint_path], created = _ensure_child_directory(
-                    project_fd, footprint_path.name
+                    library_fd, footprint_path.name
                 )
                 if created:
-                    created_dirs.append((project_fd, footprint_path.name))
+                    created_dirs.append((library_fd, footprint_path.name))
             if contents.models:
                 directory_fds[model_root], created = _ensure_child_directory(
-                    project_fd, model_root.name
+                    library_fd, model_root.name
                 )
                 if created:
-                    created_dirs.append((project_fd, model_root.name))
+                    created_dirs.append((library_fd, model_root.name))
                 directory_fds[model_root / part], created = _ensure_child_directory(
                     directory_fds[model_root], part
                 )
@@ -682,7 +742,7 @@ def _import_project_shared_locked(
                     created_dirs.append((directory_fds[model_root], part))
             for path, data in staged_assets.items():
                 parent_fd = (
-                    project_fd if path == symbol_path else directory_fds[path.parent]
+                    library_fd if path == symbol_path else directory_fds[path.parent]
                 )
                 previous = _read_at(parent_fd, path.name)
                 if path == symbol_path:
@@ -722,7 +782,7 @@ def _import_project_shared_locked(
                 if identity is None:
                     continue
                 parent_fd = (
-                    project_fd if path == symbol_path else directory_fds[path.parent]
+                    library_fd if path == symbol_path else directory_fds[path.parent]
                 )
                 try:
                     if _read_at(parent_fd, path.name) != staged:
@@ -757,7 +817,7 @@ def _import_project_shared_locked(
             os.close(descriptor)
 
     return ImportedLibraries(
-        project,
+        library_parent,
         footprint_path if contents.footprints else None,
         "SnapEDA" if contents.footprints else None,
         (symbol_path,) if contents.symbols else (),

@@ -37,6 +37,52 @@ def test_appends_project_libraries_without_replacing_existing_entries(
     assert (project / "sym-lib-table").is_file()
     assert imported.footprint_path.is_dir()
     assert imported.symbol_path.is_file()
+    assert '(uri "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty")' in table
+    assert (
+        '(uri "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym")'
+        in (project / "sym-lib-table").read_text()
+    )
+
+
+def test_old_root_snapeda_registration_is_not_repointed(tmp_path: Path) -> None:
+    project = tmp_path / "board"
+    project.mkdir()
+    old_symbols = b'(kicad_symbol_lib (version 20231120) (symbol "OldPart"))'
+    old_table = (
+        '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") '
+        '(uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))\n'
+    )
+    (project / "SnapEDA.kicad_sym").write_bytes(old_symbols)
+    (project / "sym-lib-table").write_text(old_table)
+    old_footprint_table = (
+        '(fp_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") '
+        '(uri "${KIPRJMOD}/SnapEDA.pretty") (options "") (descr "")))\n'
+    )
+    (project / "fp-lib-table").write_text(old_footprint_table)
+
+    with pytest.raises(
+        ValueError, match="existing project libraries were left unchanged"
+    ):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "new.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "NewPart"))',
+                    ),
+                ),
+                (),
+                (),
+            ),
+            project,
+            "NewPart",
+            scope="project",
+        )
+
+    assert (project / "SnapEDA.kicad_sym").read_bytes() == old_symbols
+    assert (project / "sym-lib-table").read_text() == old_table
+    assert (project / "fp-lib-table").read_text() == old_footprint_table
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").exists()
 
 
 def test_all_symbol_assets_are_registered_and_table_updates_accumulate(
@@ -127,7 +173,7 @@ def test_import_rolls_back_when_library_nickname_conflicts(tmp_path: Path) -> No
     contents = ArchiveContents((), (Asset("PKG.kicad_mod", b'(footprint "PKG")'),), ())
     with pytest.raises(ValueError, match="already registered"):
         import_component(contents, project, "Q-1", scope="project")
-    assert not (project / "SnapEDA.pretty").exists()
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.pretty").exists()
 
 
 def test_shared_project_import_rejects_duplicate_symbol_and_footprint_names(
@@ -150,7 +196,7 @@ def test_shared_project_import_rejects_duplicate_symbol_and_footprint_names(
         "first",
         scope="project",
     )
-    previous_symbols = (project / "SnapEDA.kicad_sym").read_bytes()
+    previous_symbols = (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").read_bytes()
     with pytest.raises(ValueError, match="Symbol already exists"):
         import_component(
             ArchiveContents(
@@ -174,8 +220,10 @@ def test_shared_project_import_rejects_duplicate_symbol_and_footprint_names(
             "third",
             scope="project",
         )
-    assert (project / "SnapEDA.kicad_sym").read_bytes() == previous_symbols
-    assert len(list((project / "SnapEDA.pretty").iterdir())) == 1
+    assert (
+        project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym"
+    ).read_bytes() == previous_symbols
+    assert len(list((project / "libs" / "SnapEDA" / "SnapEDA.pretty").iterdir())) == 1
 
 
 def test_symbol_merge_rejects_duplicates_in_first_and_later_files() -> None:
@@ -207,7 +255,7 @@ def test_single_incoming_symbol_library_is_checked_for_casefold_duplicates(
             "part",
             scope="project",
         )
-    assert not (project / "SnapEDA.kicad_sym").exists()
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").exists()
 
 
 def test_concurrent_symbol_imports_merge_under_project_lock(
@@ -276,7 +324,7 @@ def test_concurrent_symbol_imports_merge_under_project_lock(
         release_first.set()
         first.result(timeout=3)
         second.result(timeout=3)
-    text = (project / "SnapEDA.kicad_sym").read_text()
+    text = (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").read_text()
     assert '(symbol "A")' in text
     assert '(symbol "B")' in text
 
@@ -288,7 +336,10 @@ def test_project_import_rejects_symlinked_shared_library_directory(
     outside = tmp_path / "outside"
     project.mkdir()
     outside.mkdir()
-    (project / "SnapEDA.pretty").symlink_to(outside, target_is_directory=True)
+    (project / "libs" / "SnapEDA").mkdir(parents=True)
+    (project / "libs" / "SnapEDA" / "SnapEDA.pretty").symlink_to(
+        outside, target_is_directory=True
+    )
     with pytest.raises(OSError):
         import_component(
             ArchiveContents((), (Asset("PKG.kicad_mod", b'(footprint "PKG")'),), ()),
@@ -339,7 +390,7 @@ def test_atomic_new_asset_creation_does_not_replace_racing_file(
             "part",
             scope="project",
         )
-    collided_asset = project / "SnapEDA.pretty" / "PKG.kicad_mod"
+    collided_asset = project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "PKG.kicad_mod"
     assert collided_asset.read_bytes() == external
     metadata = collided_asset.stat(follow_symlinks=False)
     assert (metadata.st_dev, metadata.st_ino) == external_identity
@@ -389,7 +440,7 @@ def test_project_rollback_preserves_external_asset_edit_and_continues(
     project = tmp_path / "project"
     project.mkdir()
     external = b"external replacement"
-    footprint = project / "SnapEDA.pretty" / "PKG.kicad_mod"
+    footprint = project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "PKG.kicad_mod"
     real_write = library._write_at
 
     def fail_after_external_edit(
@@ -447,9 +498,11 @@ def test_project_rollback_aggregates_failure_and_attempts_remaining_files(
             "part",
             scope="project",
         )
-    assert not (project / "SnapEDA.pretty" / "Part.kicad_mod").exists()
+    assert not (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "Part.kicad_mod"
+    ).exists()
     assert (
-        project / "SnapEDA.3dshapes" / "part" / "Part.step"
+        project / "libs" / "SnapEDA" / "SnapEDA.3dshapes" / "part" / "Part.step"
     ).read_bytes() == b"model"
 
 
@@ -480,7 +533,9 @@ def test_post_link_directory_fsync_failure_rolls_back_asset_and_tables(
             scope="project",
         )
     assert injected
-    assert not (project / "SnapEDA.pretty" / "PKG.kicad_mod").exists()
+    assert not (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "PKG.kicad_mod"
+    ).exists()
     assert not (project / "fp-lib-table").exists()
     assert not list(project.rglob(".snapeda-*"))
 
@@ -508,7 +563,7 @@ def test_post_replace_directory_fsync_failure_restores_combined_symbol(
         "first",
         scope="project",
     )
-    symbol = project / "SnapEDA.kicad_sym"
+    symbol = project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym"
     original = symbol.read_bytes()
     table_before = (project / "sym-lib-table").read_bytes()
     real_fsync = os.fsync
@@ -570,7 +625,9 @@ def test_post_link_temporary_unlink_failure_retries_then_rolls_back(
             scope="project",
         )
     assert injected
-    assert not (project / "SnapEDA.pretty" / "PKG.kicad_mod").exists()
+    assert not (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "PKG.kicad_mod"
+    ).exists()
     assert not (project / "fp-lib-table").exists()
     assert not list(project.rglob(".snapeda-*"))
 
@@ -653,7 +710,10 @@ def test_project_model_path_uses_kiprojmod_for_downloaded_name_mismatch(
     )
     imported = import_component(contents, tmp_path, "SI-52008-F", scope="project")
     footprint_text = (imported.footprint_path / "BEL_SI-52008-F.kicad_mod").read_text()
-    assert "${KIPRJMOD}/SnapEDA.3dshapes/SI-52008-F/SI-52008-F.step" in footprint_text
+    assert (
+        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.3dshapes/SI-52008-F/SI-52008-F.step"
+        in footprint_text
+    )
 
 
 def test_failed_second_table_write_restores_first_table(
@@ -774,8 +834,8 @@ def test_rollback_does_not_replace_a_newer_external_table_version(
     assert changed
     assert fp_table.read_bytes() == external
     assert sym_table.read_bytes() == original_sym
-    assert not (project / "SnapEDA.pretty").exists()
-    assert not (project / "SnapEDA.kicad_sym").exists()
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.pretty").exists()
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").exists()
 
 
 def test_malformed_footprint_is_rejected_before_registration(tmp_path: Path) -> None:
@@ -788,4 +848,4 @@ def test_malformed_footprint_is_rejected_before_registration(tmp_path: Path) -> 
             "Q-1",
             scope="project",
         )
-    assert not (project / "SnapEDA.pretty").exists()
+    assert not (project / "libs" / "SnapEDA" / "SnapEDA.pretty").exists()

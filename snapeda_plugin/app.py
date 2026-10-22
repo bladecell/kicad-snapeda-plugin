@@ -20,6 +20,7 @@ from .credential_store import CredentialStore
 from .http_auth import AuthError, SnapEDAClient
 from .images import PreviewToken, inspect_image_header, preview_is_current
 from .library import import_component, model_binding_options
+from .project_context import active_project_root
 from .search import Part, search_parts
 
 _PREVIEW_HOSTS = {
@@ -264,9 +265,7 @@ class MainFrame(wx.Frame):
         preview_panel.SetMinSize((1, 1))
         results_panel.SetMinSize((1, 1))
         results_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.results = wx.ListCtrl(
-            results_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
-        )
+        self.results = wx.ListCtrl(results_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.results.SetMinSize((1, 1))
         self.results.InsertColumn(0, "Part number", width=185)
         self.results.InsertColumn(1, "Manufacturer", width=165)
@@ -497,7 +496,6 @@ class MainFrame(wx.Frame):
         preview.set_image(image)
         message.SetLabel("")
 
-
     def set_preview_error(self, error: str, token: PreviewToken) -> None:
         if not preview_is_current(
             token,
@@ -527,7 +525,7 @@ class MainFrame(wx.Frame):
             return
         scope_dialog = wx.SingleChoiceDialog(
             self,
-            "Choose where KiCad should register the imported libraries.",
+            "Choose where to register the imported libraries. Project scope uses the current KiCad project when available.",
             "Library scope",
             ["Project libraries", "Personal global libraries"],
         )
@@ -536,18 +534,38 @@ class MainFrame(wx.Frame):
             return
         global_scope = scope_dialog.GetSelection() == 1
         scope_dialog.Destroy()
-        with wx.DirDialog(
-            self,
-            (
-                "Choose the personal library folder"
-                if global_scope
-                else "Choose the project root folder"
-            ),
-            style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
-        ) as picker:
-            if picker.ShowModal() != wx.ID_OK:
+        if global_scope:
+            with wx.DirDialog(
+                self,
+                "Choose the personal library folder",
+                style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
+            ) as picker:
+                if picker.ShowModal() != wx.ID_OK:
+                    return
+                destination = Path(picker.GetPath())
+        else:
+            project_root = active_project_root()
+            if project_root is None:
+                with wx.DirDialog(
+                    self,
+                    "KiCad project context is unavailable; choose the project root folder",
+                    style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
+                ) as picker:
+                    if picker.ShowModal() != wx.ID_OK:
+                        return
+                    destination = Path(picker.GetPath())
+            else:
+                destination = project_root
+            if (
+                wx.MessageBox(
+                    f"Import project libraries into {destination}?",
+                    "Confirm project destination",
+                    wx.OK | wx.CANCEL | wx.ICON_QUESTION,
+                    self,
+                )
+                != wx.ID_OK
+            ):
                 return
-            destination = Path(picker.GetPath())
         if (
             global_scope
             and wx.MessageBox(
@@ -843,7 +861,8 @@ class MainFrame(wx.Frame):
             return
         scope = "global personal" if global_scope else "project"
         self.status.SetLabel(
-            f"Imported to {path}; KiCad {scope} library tables were updated."
+            f"Imported to {path}; KiCad {scope} library tables were updated. "
+            "If new libraries are not visible yet, reload them in KiCad."
         )
         self._update_controls()
 

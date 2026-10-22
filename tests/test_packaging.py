@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import zipfile
 from pathlib import Path
@@ -30,6 +31,7 @@ def test_build_package_is_reproducible_and_contains_only_pcm_payload(
         assert "plugins/plugin.json" in names
         assert "plugins/ipc_action.py" in names
         assert "plugins/launch.py" in names
+        assert "plugins/snapeda_plugin/project_context.py" in names
         assert "plugins/LICENSE" in names
         assert (
             archive.read("plugins/requirements.txt")
@@ -51,6 +53,25 @@ def test_build_package_is_reproducible_and_contains_only_pcm_payload(
             "runtime": "ipc",
         }
         assert "download_url" not in version
+
+
+def test_packaged_project_context_imports_from_extracted_archive(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package.zip"
+    build_package(ROOT, VERSION, package)
+    payload_path = "plugins/snapeda_plugin/project_context.py"
+    with zipfile.ZipFile(package) as archive:
+        archive.extract(payload_path, tmp_path)
+
+    module_path = tmp_path / payload_path
+    spec = importlib.util.spec_from_file_location(
+        "isolated_project_context", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.project_root_from_documents([]) is None
 
 
 def test_toolbar_icons_and_editor_scopes_are_in_package(tmp_path: Path) -> None:

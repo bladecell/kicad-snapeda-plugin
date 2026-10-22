@@ -57,10 +57,15 @@ def test_import_creates_non_overwriting_library_and_binds_matching_model(
         )
     )
     installed = import_component(contents, tmp_path, "Part / 1", scope="project").root
-    footprint = (tmp_path / "SnapEDA.pretty" / "Part.kicad_mod").read_text()
-    assert '(model "${KIPRJMOD}/SnapEDA.3dshapes/Part_1/Part.step"' in footprint
+    footprint = (
+        tmp_path / "libs" / "SnapEDA" / "SnapEDA.pretty" / "Part.kicad_mod"
+    ).read_text()
     assert (
-        tmp_path / "SnapEDA.3dshapes" / "Part_1" / "Part.step"
+        '(model "${KIPRJMOD}/libs/SnapEDA/SnapEDA.3dshapes/Part_1/Part.step"'
+        in footprint
+    )
+    assert (
+        tmp_path / "libs" / "SnapEDA" / "SnapEDA.3dshapes" / "Part_1" / "Part.step"
     ).read_bytes() == b"ISO-10303-21;"
     with pytest.raises(FileExistsError):
         import_component(contents, tmp_path, "Part / 1", scope="project")
@@ -100,7 +105,7 @@ def test_project_imports_merge_into_shared_libraries_and_keep_model_paths(
 
     from snapeda_plugin.sexpr import parse
 
-    symbol_path = project / "SnapEDA.kicad_sym"
+    symbol_path = project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym"
     symbol_lib = parse(symbol_path.read_text())
     symbols = [
         node.children[1].value
@@ -110,11 +115,22 @@ def test_project_imports_merge_into_shared_libraries_and_keep_model_paths(
     assert symbols == ["First", "Second"]
     assert (project / "sym-lib-table").read_text().count('(name "SnapEDA")') == 1
     assert (project / "fp-lib-table").read_text().count('(name "SnapEDA")') == 1
-    assert (project / "SnapEDA.pretty" / "FirstPkg.kicad_mod").is_file()
-    first_fp = (project / "SnapEDA.pretty" / "FirstPkg.kicad_mod").read_text()
-    second_fp = (project / "SnapEDA.pretty" / "SecondPkg.kicad_mod").read_text()
-    assert "${KIPRJMOD}/SnapEDA.3dshapes/First_Part/FirstPkg.step" in first_fp
-    assert "${KIPRJMOD}/SnapEDA.3dshapes/Second_Part/SecondPkg.step" in second_fp
+    assert (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "FirstPkg.kicad_mod"
+    ).is_file()
+    first_fp = (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "FirstPkg.kicad_mod"
+    ).read_text()
+    second_fp = (
+        project / "libs" / "SnapEDA" / "SnapEDA.pretty" / "SecondPkg.kicad_mod"
+    ).read_text()
+    assert (
+        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.3dshapes/First_Part/FirstPkg.step" in first_fp
+    )
+    assert (
+        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.3dshapes/Second_Part/SecondPkg.step"
+        in second_fp
+    )
     assert '(property "Footprint" "SnapEDA:FirstPkg")' in symbol_path.read_text()
 
 

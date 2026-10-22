@@ -7,7 +7,7 @@ This project is distributed under **GPL-3.0-or-later**; see [LICENSE](LICENSE).
 ## Requirements
 
 - KiCad 10 with its system Python 3.14 and wxPython 4.2.5 runtime.
-- `curl_cffi` and `keyring` installed for that same Python environment (`python -m pip install -r requirements-system.txt`, only where permitted). Keyring is optional at runtime; without an available supported OS backend, remembering is disabled and there is no file-based fallback.
+- `curl_cffi`, `keyring`, and `kicad-python` installed for that same Python environment (`python -m pip install -r requirements-system.txt`, only where permitted). Keyring is optional at runtime; without an available supported OS backend, remembering is disabled and there is no file-based fallback.
 
 The HTTP client uses KiCad's Python environment. An interactive anti-bot challenge or unsupported login flow fails closed; the plugin does not automate or bypass challenges.
 
@@ -54,7 +54,7 @@ Search for a part and select an export destination. On the first export, enter y
 
 ## Import behavior and limitations
 
-Choose project or personal/global scope. Project imports share `SnapEDA.kicad_sym`, `SnapEDA.pretty/`, and `SnapEDA.3dshapes/`, registered once per available library in that project's `sym-lib-table` and `fp-lib-table`. New symbols are appended without replacing existing symbols; duplicate symbol names or footprint/model filenames are rejected. Imported 3D models use per-part subdirectories. Existing project libraries are left untouched and are not migrated. Global imports retain per-part libraries and update KiCad 10's user tables under `${KICAD_CONFIG_HOME}` or `~/.config/kicad/10.0`. Existing table entries and files are preserved; a nickname conflict aborts instead of taking over the entry. Global table changes require a separate confirmation.
+Choose project or personal/global scope. When IPC reports exactly one valid open PCB project, project imports automatically use `PROJECT/libs/SnapEDA/` for `SnapEDA.kicad_sym`, `SnapEDA.pretty/`, and `SnapEDA.3dshapes/`; the project-root `sym-lib-table` and `fp-lib-table` register the libraries once with `${KIPRJMOD}/libs/SnapEDA/...` paths. If project context is unavailable or ambiguous (including standalone and schematic-only launches), the plugin asks for the project root instead of guessing. New symbols are appended without replacing existing symbols; duplicate symbol names or footprint/model filenames are rejected. Imported 3D models use per-part subdirectories. Existing project libraries are left untouched and are not migrated. If the `SnapEDA` nickname is already registered at the old root-level location, import aborts and leaves the old library/table unchanged; manually resolve that conflict before importing to the new location. Global imports retain per-part libraries and update KiCad 10's user tables under `${KICAD_CONFIG_HOME}` or `~/.config/kicad/10.0`; the global asset directory is selected independently. Existing table entries and files are preserved; a nickname conflict aborts instead of taking over the entry. Global table changes require a separate confirmation.
 
 Project imports serialize this plugin's work under a no-follow directory handle. Child library directories and asset/table files are opened relative to that pinned project directory; new assets are created without replacing a name another writer created first. The selected project directory and its ancestors must be trusted. Other library managers do not share the lock, and POSIX cannot provide a conditional atomic replacement against a non-cooperating writer changing an existing combined symbol or table file between the final check and rename. Do not edit the same project libraries or tables during import.
 
@@ -64,7 +64,7 @@ Search bootstraps an anonymous session from SnapEDA's search page, then uses the
 
 The download limit is per file, not an aggregate disk quota. Temporary files and the saved copy may coexist, and monitoring can allow transient overshoot. Keep sufficient free disk space.
 
-The part search dialog uses a directory picker for the project root rather than inferring the open board path. The same IPC action is available from both the PCB and Schematic Editors.
+The part search dialog uses KiCad's read-only IPC document list to identify one open PCB project's root. It does not modify the board or schematic. KiCad does not provide verified schematic project context to this plugin; standalone or schematic-only use retains the project-root picker. Library-table writes are not followed by an unverified IPC reload command, so the user may need to reload libraries in KiCad for newly registered entries to become visible.
 
 ## HTTP login behavior
 

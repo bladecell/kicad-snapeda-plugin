@@ -140,6 +140,7 @@ def test_gui_export_worker_passes_selected_ids_not_3d_id(
     frame = MainFrame()
     frame.http_client = client  # type: ignore[assignment]
     destination = tmp_path / "libraries"
+    destination.mkdir()
     try:
         frame._start_http_import(ImportRequest(part, destination, False, None))
         assert frame.job is not None
@@ -148,16 +149,18 @@ def test_gui_export_worker_passes_selected_ids_not_3d_id(
         assert client.export_ids == (10_314_751, 22_235_084)
         assert client.export_ids[0] != part.model_3d_id
         wx_app.Yield()
-        footprint_path = destination / "SnapEDA.pretty" / "Part.kicad_mod"
+        library = destination / "libs" / "SnapEDA"
+        footprint_path = library / "SnapEDA.pretty" / "Part.kicad_mod"
         assert footprint_path.is_file()
         assert (
-            destination / "SnapEDA.3dshapes" / "NE555" / "Part.step"
+            library / "SnapEDA.3dshapes" / "NE555" / "Part.step"
         ).read_bytes() == b"ISO-10303-21;"
         assert (
-            "${KIPRJMOD}/SnapEDA.3dshapes/NE555/Part.step" in footprint_path.read_text()
+            "${KIPRJMOD}/libs/SnapEDA/SnapEDA.3dshapes/NE555/Part.step"
+            in footprint_path.read_text()
         )
         assert "SnapEDA" in (destination / "fp-lib-table").read_text()
-        symbol_path = destination / "SnapEDA.kicad_sym"
+        symbol_path = library / "SnapEDA.kicad_sym"
         assert symbol_path.is_file()
         assert "SnapEDA" in (destination / "sym-lib-table").read_text()
         assert frame.status.GetLabel().startswith("Imported to ")

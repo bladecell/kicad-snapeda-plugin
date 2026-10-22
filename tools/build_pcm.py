@@ -34,6 +34,7 @@ PAYLOAD_FILES = (
     "snapeda_plugin/http_auth.py",
     "snapeda_plugin/images.py",
     "snapeda_plugin/library.py",
+    "snapeda_plugin/project_context.py",
     "snapeda_plugin/search.py",
     "snapeda_plugin/sexpr.py",
 )
