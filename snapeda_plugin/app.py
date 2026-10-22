@@ -19,7 +19,13 @@ from .archive import inspect_archive
 from .credential_store import CredentialStore
 from .http_auth import AuthError, SnapEDAClient
 from .images import PreviewToken, inspect_image_header, preview_is_current
-from .library import import_component, model_binding_options
+from .library import (
+    StaleProjectRegistrationError,
+    StaleRegistrationConfirmation,
+    import_component,
+    inspect_stale_project_registration,
+    model_binding_options,
+)
 from .project_context import active_project_root
 from .search import Part, search_parts
 
@@ -36,6 +42,7 @@ class ImportRequest:
     destination: Path
     global_scope: bool
     table_dir: Path | None
+    stale_registration_confirmation: StaleRegistrationConfirmation | None = None
 
 
 def _is_allowed_preview_url(url: str) -> bool:
@@ -566,6 +573,25 @@ class MainFrame(wx.Frame):
                 != wx.OK
             ):
                 return
+            try:
+                stale_confirmation = inspect_stale_project_registration(destination)
+            except (StaleProjectRegistrationError, OSError, ValueError):
+                self.status.SetLabel(
+                    "Project SnapEDA registration conflicts with a different library path. No files were changed."
+                )
+                return
+            if (
+                stale_confirmation is not None
+                and wx.MessageBox(
+                    "The project has a legacy SnapEDA registration, but its referenced root-level library is missing. Repair it to use libs/SnapEDA? Existing project files will not be overwritten.",
+                    "Repair stale SnapEDA registration",
+                    wx.YES_NO | wx.ICON_WARNING,
+                    self,
+                )
+                != wx.YES
+            ):
+                self.status.SetLabel("Import cancelled. No download was started.")
+                return
         if (
             global_scope
             and wx.MessageBox(
@@ -589,7 +615,11 @@ class MainFrame(wx.Frame):
                     ),
                 )
             )
-        request = ImportRequest(part, destination, global_scope, table_dir)
+        if global_scope:
+            stale_confirmation = None
+        request = ImportRequest(
+            part, destination, global_scope, table_dir, stale_confirmation
+        )
         if self.http_client is None or not self.http_client.is_authenticated:
             self._prompt_credentials(request)
             return
@@ -766,6 +796,7 @@ class MainFrame(wx.Frame):
                     scope="global" if request.global_scope else "project",
                     table_dir=request.table_dir,
                     model_choices=choices,
+                    stale_registration_confirmation=request.stale_registration_confirmation,
                 )
                 if not self.closing:
                     wx.CallAfter(
@@ -784,6 +815,12 @@ class MainFrame(wx.Frame):
                         )
                 elif not self.closing:
                     wx.CallAfter(self._http_import_failed, str(exc))
+            except StaleProjectRegistrationError:
+                if not self.closing:
+                    wx.CallAfter(
+                        self._http_import_failed,
+                        "Project SnapEDA registration changed or conflicts with another path. No files were changed; review the project tables and retry.",
+                    )
             except Exception:
                 if not self.closing:
                     wx.CallAfter(

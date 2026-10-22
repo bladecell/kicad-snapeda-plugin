@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterator
 
 from .archive import ArchiveContents
 from .sexpr import (
+    Node,
     append_library,
     library_names,
     merge_symbol_libraries,
@@ -25,6 +26,160 @@ from .sexpr import (
     rewrite_footprint_properties,
     validate_symbol_inheritance,
 )
+
+
+class StaleProjectRegistrationError(ValueError):
+    """A SnapEDA project nickname is registered at an incompatible URI."""
+
+
+@dataclass(frozen=True, slots=True)
+class StaleRegistrationConfirmation:
+    project: Path
+    project_identity: tuple[int, int]
+    tables: tuple[tuple[str, bytes | None], ...]
+    stale_tables: tuple[str, ...]
+
+
+def _registration_fields(node: Node, name: str) -> list[Node]:
+    return [
+        child
+        for child in node.children
+        if child.value is None and child.children and child.children[0].value == name
+    ]
+
+
+def _single_registration_field(node: Node, name: str) -> Node:
+    fields = _registration_fields(node, name)
+    if len(fields) != 1 or len(fields[0].children) != 2:
+        raise StaleProjectRegistrationError("SnapEDA registration is malformed")
+    value = fields[0].children[1]
+    if value.value is None or value.children:
+        raise StaleProjectRegistrationError("SnapEDA registration is malformed")
+    return value
+
+
+def _snapeda_registration_nodes(text: str) -> list[Node]:
+    matches: list[Node] = []
+    for node in parse(text).children:
+        if (
+            node.value is not None
+            or not node.children
+            or node.children[0].value != "lib"
+        ):
+            continue
+        if any(
+            len(field.children) > 1 and field.children[1].value == "SnapEDA"
+            for field in _registration_fields(node, "name")
+        ):
+            matches.append(node)
+    return matches
+
+
+def _verify_stale_confirmation(
+    project: Path,
+    project_fd: int,
+    confirmation: StaleRegistrationConfirmation,
+    *,
+    check_tables: bool = True,
+) -> None:
+    metadata = os.fstat(project_fd)
+    if confirmation.project != project.resolve() or confirmation.project_identity != (
+        metadata.st_dev,
+        metadata.st_ino,
+    ):
+        raise StaleProjectRegistrationError(
+            "Repair confirmation is for another project"
+        )
+    for table_name, original in confirmation.tables:
+        if check_tables and _read_at(project_fd, table_name) != original:
+            raise StaleProjectRegistrationError(
+                "Project library tables changed; retry the import"
+            )
+        if table_name not in confirmation.stale_tables:
+            continue
+        root_asset = {
+            "sym-lib-table": "SnapEDA.kicad_sym",
+            "fp-lib-table": "SnapEDA.pretty",
+        }[table_name]
+        try:
+            os.stat(root_asset, dir_fd=project_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        raise StaleProjectRegistrationError("SnapEDA project library already exists")
+
+
+def inspect_stale_project_registration(
+    project: Path,
+) -> StaleRegistrationConfirmation | None:
+    """Identify known stale URIs and snapshot the selected project tables.
+
+    Confirmation is revalidated against the pinned project directory and tables
+    under this add-on's lock. Uncooperative external writers cannot be fully
+    serialized by a filesystem lock they do not honor.
+    """
+    expected = (
+        (
+            "sym-lib-table",
+            "sym_lib_table",
+            "${KIPRJMOD}/SnapEDA.kicad_sym",
+            "SnapEDA.kicad_sym",
+        ),
+        (
+            "fp-lib-table",
+            "fp_lib_table",
+            "${KIPRJMOD}/SnapEDA.pretty",
+            "SnapEDA.pretty",
+        ),
+    )
+    snapshots: dict[str, bytes | None] = {}
+    stale_tables: list[str] = []
+    found_stale = False
+    with _table_directory_lock(project) as project_fd:
+        project_metadata = os.fstat(project_fd)
+        project_identity = project_metadata.st_dev, project_metadata.st_ino
+        for table_name, table_type, old_uri, asset_name in expected:
+            raw = _read_at(project_fd, table_name)
+            snapshots[table_name] = raw
+            if raw is None:
+                continue
+            text = _table_text_at(project_fd, table_name, table_type)
+            nodes = _snapeda_registration_nodes(text)
+            if not nodes:
+                continue
+            if len(nodes) != 1:
+                raise StaleProjectRegistrationError("SnapEDA registration is ambiguous")
+            _single_registration_field(nodes[0], "name")
+            registration_type = _single_registration_field(nodes[0], "type").value
+            uri = _single_registration_field(nodes[0], "uri").value
+            if registration_type != "KiCad":
+                raise StaleProjectRegistrationError("SnapEDA registration is malformed")
+            if uri == old_uri:
+                try:
+                    os.stat(asset_name, dir_fd=project_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    found_stale = True
+                    stale_tables.append(table_name)
+                else:
+                    raise StaleProjectRegistrationError(
+                        "SnapEDA project library already exists"
+                    )
+            elif uri not in {
+                "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym",
+                "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty",
+            }:
+                raise StaleProjectRegistrationError(
+                    "SnapEDA is registered at another path"
+                )
+    return (
+        StaleRegistrationConfirmation(
+            project.resolve(),
+            project_identity,
+            tuple(snapshots.items()),
+            tuple(stale_tables),
+        )
+        if found_stale
+        else None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +440,7 @@ def _commit_tables(
     *,
     acquire_lock: bool = True,
     directory_fd: int | None = None,
+    before_publish: Callable[[], None] | None = None,
 ) -> None:
     """Merge library entries under a directory lock and preserve concurrent edits."""
     with _table_directory_lock(table_dir) if acquire_lock else nullcontext():
@@ -307,7 +463,12 @@ def _commit_tables(
                 )
                 staged_text[table_path] = current
                 names_by_path[table_path] = library_names(current)
-            nickname = parse(entry).children[1].children[1].value
+            parsed_entry = parse(entry)
+            if parsed_entry.children and parsed_entry.children[0].value == table_type:
+                staged_text[table_path] = entry
+                names_by_path[table_path] = library_names(entry)
+                continue
+            nickname = parsed_entry.children[1].children[1].value
             names = names_by_path[table_path]
             if nickname and nickname.casefold() in {name.casefold() for name in names}:
                 raise ValueError(f"Library nickname already registered: {nickname}")
@@ -327,6 +488,8 @@ def _commit_tables(
                 if read_table(path) != originals[path]:
                     raise RuntimeError(f"Library table changed during import: {path}")
                 attempted.append(path)
+                if before_publish is not None:
+                    before_publish()
                 if directory_fd is None:
                     _atomic_write(path, data)
                 else:
@@ -336,23 +499,24 @@ def _commit_tables(
                         data,
                         replace=originals[path] is not None,
                         expected=originals[path],
+                        on_publish=lambda identity, table_path=path: staged_identities.__setitem__(
+                            table_path, identity
+                        ),
                     )
-                    identity = _identity_at(directory_fd, path.name)
-                    if identity is not None:
-                        staged_identities[path] = identity
         except BaseException as failure:
             rollback_errors: list[BaseException] = []
             for path in reversed(attempted):
                 try:
                     if read_table(path) != staged[path]:
                         continue
-                    if (
-                        directory_fd is not None
-                        and path in staged_identities
-                        and _identity_at(directory_fd, path.name)
-                        != staged_identities[path]
-                    ):
-                        continue
+                    if directory_fd is not None:
+                        if path not in staged_identities:
+                            continue
+                        if (
+                            _identity_at(directory_fd, path.name)
+                            != staged_identities[path]
+                        ):
+                            continue
                     original = originals[path]
                     if original is None:
                         if directory_fd is None:
@@ -388,6 +552,7 @@ def import_component(
     scope: str,
     table_dir: Path | None = None,
     model_choices: dict[str, str] | None = None,
+    stale_registration_confirmation: StaleRegistrationConfirmation | None = None,
 ) -> ImportedLibraries:
     """Import files into shared project libraries or per-part global libraries.
 
@@ -406,7 +571,11 @@ def import_component(
     _validate_assets(contents)
     if scope == "project":
         return _import_project_shared(
-            contents, library_parent, part_name, model_choices
+            contents,
+            library_parent,
+            part_name,
+            model_choices,
+            stale_registration_confirmation,
         )
     root = library_parent / safe_name(part_name)
     root.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -519,6 +688,7 @@ def _import_project_shared(
     project: Path,
     part_name: str,
     model_choices: dict[str, str] | None,
+    stale_registration_confirmation: StaleRegistrationConfirmation | None,
 ) -> ImportedLibraries:
     """Merge project imports into the SnapEDA project libraries transactionally."""
     with _table_directory_lock(project) as project_fd:
@@ -539,6 +709,7 @@ def _import_project_shared(
                 project / "libs" / "SnapEDA",
                 part_name,
                 model_choices,
+                stale_registration_confirmation,
                 project_fd,
                 library_fd,
                 created_dirs,
@@ -563,6 +734,7 @@ def _import_project_shared_locked(
     library_parent: Path,
     part_name: str,
     model_choices: dict[str, str] | None,
+    stale_registration_confirmation: StaleRegistrationConfirmation | None,
     project_fd: int,
     library_fd: int,
     created_dirs: list[tuple[int, str]],
@@ -687,39 +859,79 @@ def _import_project_shared_locked(
             for table_path, table_type, expected_uri in expected_table_uris:
                 table_snapshots[table_path] = _read_at(project_fd, table_path.name)
                 current = _table_text_at(project_fd, table_path.name, table_type)
-                registered = next(
-                    (
-                        node
-                        for node in parse(current).children
-                        if node.value is None
-                        and node.children
-                        and node.children[0].value == "lib"
-                        and field_value(node, "name") == "SnapEDA"
-                    ),
-                    None,
-                )
-                if (
-                    registered is not None
-                    and field_value(registered, "uri") != expected_uri
-                ):
-                    raise ValueError(
-                        "Library nickname already registered at another path: SnapEDA; "
-                        "existing project libraries were left unchanged"
+                registrations = _snapeda_registration_nodes(current)
+                if len(registrations) > 1:
+                    raise StaleProjectRegistrationError(
+                        "SnapEDA registration is ambiguous"
                     )
+                registered = registrations[0] if registrations else None
+                if registered is not None:
+                    _single_registration_field(registered, "name")
+                    if _single_registration_field(registered, "type").value != "KiCad":
+                        raise StaleProjectRegistrationError(
+                            "SnapEDA registration is malformed"
+                        )
+                    registered_uri = _single_registration_field(registered, "uri").value
+                else:
+                    registered_uri = None
+                if registered is not None and registered_uri != expected_uri:
+                    old_uri = {
+                        "sym_lib_table": "${KIPRJMOD}/SnapEDA.kicad_sym",
+                        "fp_lib_table": "${KIPRJMOD}/SnapEDA.pretty",
+                    }[table_type]
+                    confirmed = (
+                        dict(stale_registration_confirmation.tables)
+                        if stale_registration_confirmation
+                        and stale_registration_confirmation.project == project.resolve()
+                        else {}
+                    )
+                    if registered_uri != old_uri or table_path.name not in confirmed:
+                        raise StaleProjectRegistrationError(
+                            "Library nickname already registered at another path: SnapEDA; existing project libraries were left unchanged"
+                        )
+                    if table_snapshots[table_path] != confirmed[table_path.name]:
+                        raise StaleProjectRegistrationError(
+                            "Project library tables changed; retry the import"
+                        )
+            if stale_registration_confirmation is not None:
+                _verify_stale_confirmation(
+                    project, project_fd, stale_registration_confirmation
+                )
             for table_path, table_type, entry in entries:
                 current = _table_text_at(project_fd, table_path.name, table_type)
-                registered = next(
-                    (
-                        node
-                        for node in parse(current).children
-                        if node.value is None
-                        and node.children
-                        and node.children[0].value == "lib"
-                        and field_value(node, "name") == "SnapEDA"
-                    ),
-                    None,
-                )
+                registrations = _snapeda_registration_nodes(current)
+                if len(registrations) > 1:
+                    raise StaleProjectRegistrationError(
+                        "SnapEDA registration is ambiguous"
+                    )
+                registered = registrations[0] if registrations else None
                 if registered is not None:
+                    _single_registration_field(registered, "name")
+                    _single_registration_field(registered, "type")
+                    uri_field = _single_registration_field(registered, "uri")
+                    target_uri = (
+                        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym"
+                        if table_type == "sym_lib_table"
+                        else "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty"
+                    )
+                    if uri_field.value == target_uri:
+                        continue
+                    uri_node = next(
+                        child.children[1]
+                        for child in registered.children
+                        if child.value is None
+                        and len(child.children) > 1
+                        and child.children[0].value == "uri"
+                    )
+                    replacement = quote(target_uri)
+                    updated = (
+                        current[: uri_node.start]
+                        + replacement
+                        + current[uri_node.end :]
+                    )
+                    entries_to_update = (table_path, table_type, updated)
+                    # The table is committed with the same transaction as assets.
+                    filtered_entries.append(entries_to_update)
                     continue
                 filtered_entries.append((table_path, table_type, entry))
             entries = filtered_entries
@@ -773,8 +985,27 @@ def _import_project_shared_locked(
                 for path, snapshot in table_snapshots.items()
             ):
                 raise RuntimeError("Library table changed during import")
+            if stale_registration_confirmation is not None:
+                _verify_stale_confirmation(
+                    project, project_fd, stale_registration_confirmation
+                )
             _commit_tables(
-                project, entries, acquire_lock=False, directory_fd=project_fd
+                project,
+                entries,
+                acquire_lock=False,
+                directory_fd=project_fd,
+                before_publish=(
+                    lambda: (
+                        _verify_stale_confirmation(
+                            project,
+                            project_fd,
+                            stale_registration_confirmation,
+                            check_tables=False,
+                        )
+                        if stale_registration_confirmation is not None
+                        else None
+                    )
+                ),
             )
         except BaseException as failure:
             rollback_errors: list[BaseException] = []

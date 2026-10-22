@@ -85,6 +85,379 @@ def test_old_root_snapeda_registration_is_not_repointed(tmp_path: Path) -> None:
     assert not (project / "libs" / "SnapEDA" / "SnapEDA.kicad_sym").exists()
 
 
+def test_confirmed_stale_registration_repairs_missing_root_library(
+    tmp_path: Path,
+) -> None:
+    from snapeda_plugin.library import inspect_stale_project_registration
+
+    project = tmp_path / "board"
+    project.mkdir()
+    sym_table = '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))\n'
+    fp_table = '(fp_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.pretty") (options "") (descr "")))\n'
+    (project / "sym-lib-table").write_text(sym_table)
+    (project / "fp-lib-table").write_text(fp_table)
+    confirmation = inspect_stale_project_registration(project)
+    assert confirmation is not None
+
+    import_component(
+        ArchiveContents(
+            (
+                Asset(
+                    "part.kicad_sym",
+                    b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                ),
+            ),
+            (Asset("PKG.kicad_mod", b'(footprint "PKG")'),),
+            (),
+        ),
+        project,
+        "New",
+        scope="project",
+        stale_registration_confirmation=confirmation,
+    )
+    assert (
+        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym"
+        in (project / "sym-lib-table").read_text()
+    )
+    assert (
+        "${KIPRJMOD}/libs/SnapEDA/SnapEDA.pretty"
+        in (project / "fp-lib-table").read_text()
+    )
+    assert (project / "libs/SnapEDA/SnapEDA.kicad_sym").is_file()
+
+
+def test_stale_registration_confirmation_is_invalidated_by_table_change(
+    tmp_path: Path,
+) -> None:
+    from snapeda_plugin.library import (
+        StaleProjectRegistrationError,
+        inspect_stale_project_registration,
+    )
+
+    project = tmp_path / "board"
+    project.mkdir()
+    table = project / "sym-lib-table"
+    table.write_text(
+        '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    )
+    confirmation = inspect_stale_project_registration(project)
+    assert confirmation is not None
+    table.write_text(
+        '(sym_lib_table (version 7) (lib (name "Other") (type "KiCad") (uri "other") (options "") (descr "")))'
+    )
+
+    with pytest.raises(StaleProjectRegistrationError):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "part.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+            stale_registration_confirmation=confirmation,
+        )
+    assert table.read_text().find('"Other"') >= 0
+    assert not (project / "libs/SnapEDA/SnapEDA.kicad_sym").exists()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        '(name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (uri "foreign")',
+        '(name "SnapEDA") (type "KiCad") (type "Other") (uri "${KIPRJMOD}/SnapEDA.kicad_sym")',
+        '(name "SnapEDA") (name "Other") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym")',
+        '(name "SnapEDA") (type "KiCad") (uri "foreign") (uri "${KIPRJMOD}/SnapEDA.kicad_sym")',
+    ],
+)
+def test_ambiguous_legacy_registration_shape_is_not_repairable(
+    tmp_path: Path, fields: str
+) -> None:
+    from snapeda_plugin.library import (
+        StaleProjectRegistrationError,
+        inspect_stale_project_registration,
+    )
+
+    project = tmp_path / "board"
+    project.mkdir()
+    (project / "sym-lib-table").write_text(
+        f"(sym_lib_table (version 7) (lib {fields}))"
+    )
+    with pytest.raises(StaleProjectRegistrationError):
+        inspect_stale_project_registration(project)
+
+
+def test_confirmation_is_bound_to_directory_identity_and_absent_tables(
+    tmp_path: Path,
+) -> None:
+    from snapeda_plugin.library import (
+        StaleProjectRegistrationError,
+        inspect_stale_project_registration,
+    )
+
+    project = tmp_path / "board"
+    project.mkdir()
+    table = '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    (project / "sym-lib-table").write_text(table)
+    confirmation = inspect_stale_project_registration(project)
+    assert confirmation is not None
+    moved = tmp_path / "old-board"
+    project.rename(moved)
+    project.mkdir()
+    (project / "sym-lib-table").write_text(table)
+
+    with pytest.raises(StaleProjectRegistrationError):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "new.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+            stale_registration_confirmation=confirmation,
+        )
+    assert (project / "sym-lib-table").read_text() == table
+
+
+def test_stale_root_asset_created_before_table_commit_aborts_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import snapeda_plugin.library as library
+
+    project = tmp_path / "board"
+    project.mkdir()
+    table = project / "sym-lib-table"
+    original_table = '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    table.write_text(original_table)
+    confirmation = library.inspect_stale_project_registration(project)
+    assert confirmation is not None
+    real_write = library._write_at
+    foreign = b"unmanaged concurrent project asset"
+
+    def create_legacy_asset_after_asset_publish(
+        directory_fd: int, name: str, data: bytes, **kwargs: object
+    ) -> tuple[int, int]:
+        result = real_write(directory_fd, name, data, **kwargs)  # type: ignore[arg-type]
+        if name == "SnapEDA.kicad_sym":
+            (project / "SnapEDA.kicad_sym").write_bytes(foreign)
+        return result
+
+    monkeypatch.setattr(library, "_write_at", create_legacy_asset_after_asset_publish)
+    with pytest.raises(library.StaleProjectRegistrationError):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "new.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+            stale_registration_confirmation=confirmation,
+        )
+    assert table.read_text() == original_table
+    assert (project / "SnapEDA.kicad_sym").read_bytes() == foreign
+    assert not (project / "libs/SnapEDA/SnapEDA.kicad_sym").exists()
+
+
+def test_post_publication_failure_preserves_identical_external_table_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+
+    import snapeda_plugin.library as library
+
+    project = tmp_path / "board"
+    project.mkdir()
+    table = project / "sym-lib-table"
+    original = '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    table.write_text(original)
+    confirmation = library.inspect_stale_project_registration(project)
+    assert confirmation is not None
+    real_fsync = os.fsync
+    foreign_identity: tuple[int, int] | None = None
+    replaced = False
+
+    def replace_identical_table_then_fail(fd: int) -> None:
+        nonlocal foreign_identity, replaced
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and not replaced:
+            try:
+                staged = table.read_bytes()
+            except FileNotFoundError:
+                staged = b""
+            if b"${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym" in staged:
+                replacement = project / "external-table"
+                replacement.write_bytes(staged)
+                os.replace(replacement, table)
+                metadata = table.stat(follow_symlinks=False)
+                foreign_identity = metadata.st_dev, metadata.st_ino
+                replaced = True
+                raise OSError("injected post-publication fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(library.os, "fsync", replace_identical_table_then_fail)
+    with pytest.raises(OSError, match="post-publication"):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "new.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+            stale_registration_confirmation=confirmation,
+        )
+    assert replaced
+    assert table.read_text().find("${KIPRJMOD}/libs/SnapEDA/SnapEDA.kicad_sym") >= 0
+    metadata = table.stat(follow_symlinks=False)
+    assert (metadata.st_dev, metadata.st_ino) == foreign_identity
+    assert not (project / "libs/SnapEDA/SnapEDA.kicad_sym").exists()
+
+
+def test_failed_no_replace_publication_keeps_identical_unowned_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import snapeda_plugin.library as library
+
+    project = tmp_path / "board"
+    project.mkdir()
+    fp_table = project / "fp-lib-table"
+    original_fp = '(fp_lib_table (version 7) (lib (name "Existing") (type "KiCad") (uri "old.pretty") (options "") (descr "")))'
+    fp_table.write_text(original_fp)
+    real_write = library._write_at
+    external_identity: tuple[int, int] | None = None
+    external_table: bytes | None = None
+
+    def race_absent_table(
+        directory_fd: int, name: str, data: bytes, **kwargs: object
+    ) -> tuple[int, int]:
+        nonlocal external_identity, external_table
+        if name == "sym-lib-table":
+            external_table = data
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            external_identity = metadata.st_dev, metadata.st_ino
+        return real_write(directory_fd, name, data, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(library, "_write_at", race_absent_table)
+    with pytest.raises(FileExistsError):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "new.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (Asset("PKG.kicad_mod", b'(footprint "PKG")'),),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+        )
+    sym_table = project / "sym-lib-table"
+    assert sym_table.read_bytes() == external_table
+    metadata = sym_table.stat(follow_symlinks=False)
+    assert (metadata.st_dev, metadata.st_ino) == external_identity
+    assert fp_table.read_text() == original_fp
+    assert not (project / "libs/SnapEDA/SnapEDA.kicad_sym").exists()
+    assert not (project / "libs/SnapEDA/SnapEDA.pretty/PKG.kicad_mod").exists()
+
+
+def test_broken_symlink_is_not_treated_as_missing_legacy_asset(tmp_path: Path) -> None:
+    from snapeda_plugin.library import (
+        StaleProjectRegistrationError,
+        inspect_stale_project_registration,
+    )
+
+    project = tmp_path / "board"
+    project.mkdir()
+    (project / "SnapEDA.kicad_sym").symlink_to(project / "absent-target")
+    (project / "sym-lib-table").write_text(
+        '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    )
+    with pytest.raises(StaleProjectRegistrationError):
+        inspect_stale_project_registration(project)
+
+
+def test_failed_stale_table_commit_restores_both_tables_and_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import snapeda_plugin.library as library
+
+    project = tmp_path / "board"
+    project.mkdir()
+    original_sym = '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))\n'
+    original_fp = '(fp_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.pretty") (options "") (descr "")))\n'
+    (project / "sym-lib-table").write_text(original_sym)
+    (project / "fp-lib-table").write_text(original_fp)
+    confirmation = library.inspect_stale_project_registration(project)
+    assert confirmation is not None
+    write_at = library._write_at
+
+    def fail_footprint_table(
+        directory_fd: int, name: str, data: bytes, **kwargs: object
+    ) -> tuple[int, int]:
+        if name == "fp-lib-table" and b"libs/SnapEDA" in data:
+            raise PermissionError("injected table failure")
+        return write_at(directory_fd, name, data, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(library, "_write_at", fail_footprint_table)
+    with pytest.raises(PermissionError):
+        import_component(
+            ArchiveContents(
+                (
+                    Asset(
+                        "part.kicad_sym",
+                        b'(kicad_symbol_lib (version 20231120) (symbol "New"))',
+                    ),
+                ),
+                (Asset("PKG.kicad_mod", b'(footprint "PKG")'),),
+                (),
+            ),
+            project,
+            "New",
+            scope="project",
+            stale_registration_confirmation=confirmation,
+        )
+    assert (project / "sym-lib-table").read_text() == original_sym
+    assert (project / "fp-lib-table").read_text() == original_fp
+    assert not (project / "libs/SnapEDA/SnapEDA.kicad_sym").exists()
+    assert not (project / "libs/SnapEDA/SnapEDA.pretty/PKG.kicad_mod").exists()
+
+
 def test_all_symbol_assets_are_registered_and_table_updates_accumulate(
     tmp_path: Path,
 ) -> None:

@@ -8,7 +8,9 @@ import wx
 
 from snapeda_plugin import app as app_module
 from snapeda_plugin.app import MainFrame
+from snapeda_plugin.archive import ArchiveContents
 from snapeda_plugin.credential_store import CredentialStore
+from snapeda_plugin.library import StaleProjectRegistrationError
 from snapeda_plugin.search import Part
 
 
@@ -196,4 +198,123 @@ def test_canceling_import_confirmation_does_not_queue_import(
         frame.on_import(None)
         assert requests == []
     finally:
+        frame.Destroy()
+
+
+@pytest.mark.parametrize(
+    "repair_answer, starts_import", [(wx.YES, True), (wx.NO, False)]
+)
+def test_stale_repair_confirmation_controls_import_before_authentication(
+    wx_app: wx.App,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repair_answer: int,
+    starts_import: bool,
+) -> None:
+    project = tmp_path / "board"
+    project.mkdir()
+    (project / "sym-lib-table").write_text(
+        '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "${KIPRJMOD}/SnapEDA.kicad_sym") (options "") (descr "")))'
+    )
+    ChoiceDialog.selection = 0
+    monkeypatch.setattr(wx, "SingleChoiceDialog", ChoiceDialog)
+    monkeypatch.setattr(app_module, "active_project_root", lambda: project)
+    answers = iter((wx.OK, repair_answer))
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: next(answers))
+    frame = prepare_frame(monkeypatch)
+    started = []
+    credential_prompts = []
+    monkeypatch.setattr(frame, "_start_http_import", started.append)
+    monkeypatch.setattr(frame, "_prompt_credentials", credential_prompts.append)
+    try:
+        frame.on_import(None)
+        assert bool(started) is starts_import
+        assert credential_prompts == []
+        if starts_import:
+            assert started[0].stale_registration_confirmation is not None
+        else:
+            assert (
+                frame.status.GetLabel() == "Import cancelled. No download was started."
+            )
+    finally:
+        frame.Destroy()
+
+
+def test_preflight_registration_conflict_shows_sanitized_status_without_auth(
+    wx_app: wx.App, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "board"
+    project.mkdir()
+    (project / "sym-lib-table").write_text(
+        '(sym_lib_table (version 7) (lib (name "SnapEDA") (type "KiCad") (uri "https://secret.invalid/token") (options "") (descr "")))'
+    )
+    ChoiceDialog.selection = 0
+    monkeypatch.setattr(wx, "SingleChoiceDialog", ChoiceDialog)
+    monkeypatch.setattr(app_module, "active_project_root", lambda: project)
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.OK)
+    frame = prepare_frame(monkeypatch)
+    starts = []
+    prompts = []
+    monkeypatch.setattr(frame, "_start_http_import", starts.append)
+    monkeypatch.setattr(frame, "_prompt_credentials", prompts.append)
+    try:
+        frame.on_import(None)
+        assert starts == []
+        assert prompts == []
+        assert "conflicts" in frame.status.GetLabel()
+        assert "secret.invalid" not in frame.status.GetLabel()
+    finally:
+        frame.Destroy()
+
+
+def test_worker_registration_conflict_queues_only_sanitized_domain_error(
+    wx_app: wx.App, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Client:
+        is_authenticated = True
+
+        def export(self, *_args: object) -> None:
+            Path(_args[2]).write_bytes(b"not-read-by-test-fixture")  # type: ignore[arg-type]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CredentialStore, "detect", lambda: CredentialStore())
+    monkeypatch.setattr(
+        app_module, "inspect_archive", lambda _data: ArchiveContents((), (), ())
+    )
+    monkeypatch.setattr(
+        app_module, "model_binding_options", lambda _contents: ({}, [], [])
+    )
+    monkeypatch.setattr(
+        app_module,
+        "import_component",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            StaleProjectRegistrationError("foreign URI contains secret.invalid/token")
+        ),
+    )
+    queued: list[tuple[object, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        wx,
+        "CallAfter",
+        lambda callback, *args: queued.append((callback, args)),
+    )
+    frame = MainFrame()
+    frame.http_client = Client()  # type: ignore[assignment]
+    try:
+        request = app_module.ImportRequest(part(), tmp_path, False, None)
+        frame._start_http_import(request)
+        assert frame.job is not None
+        frame.job.join(timeout=5)
+        assert not frame.job.is_alive()
+        failures = [
+            args[0]
+            for callback, args in queued
+            if callback == frame._http_import_failed
+        ]
+        assert len(failures) == 1
+        assert "registration changed or conflicts" in str(failures[0])
+        assert "secret.invalid" not in str(failures[0])
+    finally:
+        frame.closing = True
         frame.Destroy()
