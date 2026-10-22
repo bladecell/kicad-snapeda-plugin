@@ -97,7 +97,7 @@ def test_project_scope_uses_detected_root_without_folder_picker(
     monkeypatch.setattr(
         wx,
         "MessageBox",
-        lambda message, *_args, **_kwargs: confirmations.append(message) or wx.ID_OK,
+        lambda message, *_args, **_kwargs: confirmations.append(message) or wx.OK,
     )
     monkeypatch.setattr(app_module, "active_project_root", lambda: original_project)
     frame = prepare_frame(monkeypatch)
@@ -125,7 +125,7 @@ def test_global_scope_uses_chosen_folder_and_global_table_directory(
     FolderDialog.calls = 0
     monkeypatch.setattr(wx, "SingleChoiceDialog", ChoiceDialog)
     monkeypatch.setattr(wx, "DirDialog", FolderDialog)
-    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.ID_OK)
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.OK)
     monkeypatch.setenv("KICAD_CONFIG_HOME", str(config))
     detection_calls: list[None] = []
 
@@ -163,7 +163,7 @@ def test_missing_project_context_uses_picker_instead_of_cached_project(
     monkeypatch.setattr(
         wx,
         "MessageBox",
-        lambda message, *_args, **_kwargs: confirmations.append(message) or wx.ID_OK,
+        lambda message, *_args, **_kwargs: confirmations.append(message) or wx.OK,
     )
     monkeypatch.setattr(app_module, "active_project_root", lambda: None)
     frame = prepare_frame(monkeypatch)
@@ -175,5 +175,25 @@ def test_missing_project_context_uses_picker_instead_of_cached_project(
         assert len(requests) == 1
         assert requests[0].destination == selected_project
         assert str(selected_project) in confirmations[0]
+    finally:
+        frame.Destroy()
+
+
+@pytest.mark.parametrize("selection", [0, 1])
+def test_canceling_import_confirmation_does_not_queue_import(
+    wx_app: wx.App, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, selection: int
+) -> None:
+    ChoiceDialog.selection = selection
+    FolderDialog.path = str(tmp_path)
+    monkeypatch.setattr(wx, "SingleChoiceDialog", ChoiceDialog)
+    monkeypatch.setattr(wx, "DirDialog", FolderDialog)
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.CANCEL)
+    monkeypatch.setattr(app_module, "active_project_root", lambda: tmp_path)
+    frame = prepare_frame(monkeypatch)
+    requests = []
+    monkeypatch.setattr(frame, "_start_http_import", requests.append)
+    try:
+        frame.on_import(None)
+        assert requests == []
     finally:
         frame.Destroy()

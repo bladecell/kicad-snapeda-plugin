@@ -563,7 +563,7 @@ class MainFrame(wx.Frame):
                     wx.OK | wx.CANCEL | wx.ICON_QUESTION,
                     self,
                 )
-                != wx.ID_OK
+                != wx.OK
             ):
                 return
         if (
@@ -574,7 +574,7 @@ class MainFrame(wx.Frame):
                 wx.OK | wx.CANCEL | wx.ICON_WARNING,
                 self,
             )
-            != wx.ID_OK
+            != wx.OK
         ):
             return
         table_dir = None
